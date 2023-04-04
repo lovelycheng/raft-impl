@@ -48,6 +48,8 @@
         <module>server</module>
         <module>client</module>
         <module>common</module>
+        <module>serialization</module>
+        <module>test</module>
     </modules>
 
     <build>

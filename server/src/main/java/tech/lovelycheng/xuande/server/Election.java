@@ -43,19 +43,22 @@ public class Election extends Thread {
 
     private Quorums quorums;
     RecvWorker rw;
-    private final LinkedBlockingQueue<VoteResponse> recvQueue = new LinkedBlockingQueue<>();
-    private Map<Integer, MsgSender> senderMap = new ConcurrentHashMap<>();
-    private Map<Integer, LinkedBlockingQueue<RequestVote>> senderQueueMap = new ConcurrentHashMap<>();
+
+    private Map<Integer, Socket> cnxnMap = new ConcurrentHashMap<>();
 
     public Election(QuorumPeer self) {
         this.self = self;
         this.quorums = self.getQuorums();
-        this.rw = new RecvWorker(self.getMyid(), recvQueue, self);
-        for (Map.Entry<Integer, QuorumPeer> entry : quorums.getQuorum().entrySet()) {
-            LinkedBlockingQueue<RequestVote> linkedBlockingQueue = new LinkedBlockingQueue<>();
-            senderMap.put(entry.getKey(), new MsgSender(entry.getKey(), linkedBlockingQueue, self, entry.getValue()));
-            senderQueueMap.put(entry.getKey(), linkedBlockingQueue);
-        }
+        // this.rw = new RecvWorker(self.getMyid(), recvQueue, self);
+        // for (Map.Entry<Integer, QuorumPeer> entry : quorums.getQuorum()
+        //     .entrySet()) {
+        //     LinkedBlockingQueue<RequestVote> linkedBlockingQueue = new LinkedBlockingQueue<>();
+        //     if (Objects.equals(entry.getKey(), self.getMyid())) {
+        //         continue;
+        //     }
+        //     senderMap.put(entry.getKey(), new MsgSender(entry.getKey(), linkedBlockingQueue, self, entry.getValue()));
+        //     senderQueueMap.put(entry.getKey(), linkedBlockingQueue);
+        // }
     }
 
     @Override
@@ -63,11 +66,14 @@ public class Election extends Thread {
         this.rw.start();
         for (Map.Entry<Integer, QuorumPeer> entry : quorums.getQuorum()
             .entrySet()) {
-            if(entry.getKey() == self.getMyid()){
+            if (Objects.equals(entry.getKey(), self.getMyid())) {
                 continue;
             }
-            senderMap.get(entry.getKey()).start();
-            senderMap.get(entry.getKey()).queue.offer(new RequestVote(self.getTerm(),self.getMyid(),self.getCommittedIndex().get(),self.getTerm()));
+            // senderMap.get(entry.getKey())
+            //     .start();
+            // senderMap.get(entry.getKey()).queue.offer(new RequestVote(self.getTerm(), self.getMyid(),
+            //     self.getCommittedIndex()
+            //         .get(), self.getTerm()));
         }
         super.start();
     }
@@ -99,22 +105,31 @@ public class Election extends Thread {
             this.peer = peer;
         }
 
-
         private void initConnection() {
             try {
+                if (cnxnMap.get(peer.getMyid()) != null) {
+                    log.info("id：{} connection established", peer.getMyid());
+                    return;
+                }
                 socket = new Socket();
                 socket.connect(peer.getInetSocketAddress());
-                log.info("{} connect to {} succeed",self.getMyid(),peer.getMyid());
+
+                log.info("{} connect to {} succeed", self.getMyid(), peer.getMyid());
                 BufferedOutputStream buf = new BufferedOutputStream(socket.getOutputStream());
                 dout = new DataOutputStream(buf);
                 din = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
             } catch (IOException e) {
-                log.error("{} connect to {} failed",self.getMyid(),this.sid);
-                e.printStackTrace();
+                log.error("{} connect to {} failed", self.getMyid(), this.sid, e);
                 try {
-                    socket.close();
-                    dout.close();
-                    din.close();
+                    if (socket != null) {
+                        socket.close();
+                    }
+                    if (dout != null) {
+                        dout.close();
+                    }
+                    if (din != null) {
+                        din.close();
+                    }
                 } catch (IOException ie) {
                     log.error("Exception while closing", ie);
                 }
@@ -124,11 +139,13 @@ public class Election extends Thread {
         @Override
         public void run() {
 
-            if(this.socket == null || this.socket.isClosed()){
+            if (this.socket == null || this.socket.isClosed()) {
                 initConnection();
             }
-            if(this.socket == null ||this.socket.isClosed()){
-                log.error("sender线程 socket创建失败，连接地址:{}:{}",this.peer.getInetSocketAddress().getAddress(),this.peer.getInetSocketAddress().getPort());
+            if (this.socket == null || this.socket.isClosed()) {
+                log.error("sender线程 socket创建失败，连接地址:{}:{}", this.peer.getInetSocketAddress()
+                    .getAddress(), this.peer.getInetSocketAddress()
+                    .getPort());
                 return;
             }
 
@@ -152,6 +169,7 @@ public class Election extends Thread {
         private final int sid;
         private final LinkedBlockingQueue<VoteResponse> queue;
         private final QuorumPeer self;
+        private ConcurrentHashMap<Integer, Socket> sidSocketMap = new ConcurrentHashMap<>();
 
         public RecvWorker(int sid, LinkedBlockingQueue<VoteResponse> queue, QuorumPeer self) {
             this.sid = sid;
@@ -164,55 +182,44 @@ public class Election extends Thread {
 
             ServerSocket serverSocket = null;
             InputStream inputStream = null;
-            try{
-                serverSocket = new ServerSocket(self.getInetSocketAddress().getPort());
-                log.info("Server {} listen... ",self.getMyid());
-                Socket socket = serverSocket.accept();
-                log.info("socket accepted");
-                socket.setSoTimeout(0);
-                inputStream = socket.getInputStream();
-                BufferedInputStream bis = new BufferedInputStream(inputStream);
-                DataInputStream dis = new DataInputStream(bis);
-                byte[] bytes = new byte[dis.available()];
-                dis.read(bytes);
-                RequestVote response = protocol.deserialize(RequestVote.class,bytes);
-                log.info(response.toString());
-            }catch (Exception e){
-                e.printStackTrace();
-                log.error("{} connect to {} failed",self.getMyid(),this.sid);
-            }finally {
+            while (true) {
+                Socket socket = null;
                 try {
-                    if(serverSocket != null){
-                        serverSocket.close();
-                    }
-                    inputStream.close();
+                    serverSocket = new ServerSocket(self.getInetSocketAddress()
+                        .getPort());
+                    log.info("Server {} listen... ", self.getMyid());
+                    socket = serverSocket.accept();
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
-            }
 
-            while (true) {
-                VoteResponse body = null;
                 try {
-                    body = queue.take();
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-                if (body == null) {
-                    log.info("data readed is null");
-                    continue;
-                }
 
+                    log.info("socket accepted");
+                    socket.setSoTimeout(0);
+                    inputStream = socket.getInputStream();
+                    BufferedInputStream bis = new BufferedInputStream(inputStream);
+                    DataInputStream dis = new DataInputStream(bis);
+                    byte[] bytes = new byte[dis.available()];
+                    dis.read(bytes);
+                    RequestVote response = protocol.deserialize(RequestVote.class, bytes);
+                    cnxnMap.put(response.getCandidateId(), socket);
+                    log.info(response.toString());
+                } catch (Exception e) {
+                    log.error("{} connect to {} failed", self.getMyid(), this.sid);
+                } finally {
+                    try {
+                        if (serverSocket != null) {
+                            serverSocket.close();
+                        }
+                        inputStream.close();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }
             }
+
         }
     }
 
-    public static void main(String[] args) throws InterruptedException {
-        QuorumPeer quorumPeer = new QuorumPeer();
-        quorumPeer.parseConfig(Objects.requireNonNull(Config.getConfig(1)));
-        Election election = new Election(quorumPeer);
-
-        election.start();
-        election.join();
-    }
 }
